@@ -56,6 +56,16 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
     /** 重定向给 Minis 的 action。 */
     private static final String ACTION_VOICE_ASSIST = "android.intent.action.VOICE_ASSIST";
 
+    /**
+     * v2.1：拉起 Minis 时附带的 extra —— 本次唤起是否应附带当前屏幕截图
+     * （由 Minis 侧 AssistCapture 读取）。长按电源键视为"快速提问"不截图，
+     * 双击小白条等手势视为"屏幕即现场"截图。
+     */
+    public static final String EXTRA_ATTACH_SCREEN = "com.openminis.hook.attach_screen";
+
+    /** 电源键派发携带的标记 extra（实测拓扑：长按电源键的 extras 含该键）。 */
+    private static final String EXTRA_POWER_WAKEUP = "app.send.wakeup.command";
+
     /** 防抖窗口（毫秒）：该时间内重复唤起只抑制不重复拉起。 */
     private static final long DEBOUNCE_MS = 1200L;
 
@@ -347,17 +357,23 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
         }
 
         try {
+            // [v2.1] 触发源判定：电源键唤起（原始 extras 含 app.send.wakeup.command）
+            // 视为快速提问 → 不附带屏幕截图；双击小白条等其余手势 → 附带。
+            boolean attachScreen = !intent.hasExtra(EXTRA_POWER_WAKEUP);
+
             Intent launch = new Intent();
             launch.setComponent(new ComponentName(MINIS_PACKAGE, MINIS_ACTIVITY));
             launch.setAction(ACTION_VOICE_ASSIST);
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            launch.putExtra(EXTRA_ATTACH_SCREEN, attachScreen);
             svc.startActivity(launch);
 
             sLastRedirectElapsed = SystemClock.elapsedRealtime();
             suppressOriginal(param, startId);
-            String msg = "[redirect] launched Minis, suppressed xiaomi (startId=" + startId + ")";
+            String msg = "[redirect] launched Minis, suppressed xiaomi (startId=" + startId
+                    + ", attachScreen=" + attachScreen + ")";
             Log.i(TAG, msg);
             XposedBridge.log(TAG + " " + msg);
         } catch (Throwable t) {

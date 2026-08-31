@@ -36,6 +36,18 @@ component= com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService
 2. `param.setResult(0)` 抑制原始调用，小爱浮窗不显示；
 3. 1200ms 防抖；任何一步失败则**不抑制**，小爱兜底照常可用。
 
+**触发源判定（v2.1）**：按原始 intent 的 extras 区分唤起来源，并在拉起 intent 上附加
+`com.openminis.hook.attach_screen`（Boolean）供 Minis 侧决定是否截屏：
+
+| 触发 | 判定依据 | attach_screen | Minis 行为 |
+|---|---|---|---|
+| 长按电源键 | extras 含 `app.send.wakeup.command` | `false` | 快速提问，不附带屏幕截图 |
+| 双击小白条等手势 | 其余命中 | `true` | 唤起时自动附当前屏幕截图 |
+
+Minis 侧（[xiki45/OpenMinis](https://github.com/xiki45/OpenMinis) `feature/system-assist`
+分支的 `AssistCapture`）读取该 extra；**extra 缺失时默认截图**（兼容旧模块 /
+标准框架路线）。模块本身不做截图——无障碍服务实例在 Minis 进程内，本模块只传信号。
+
 不杀小爱进程、不碰其它组件；MiPush 等无关 service 启动不受影响。
 
 - 日志 TAG：`MinisHook`（logcat + XposedBridge 双通道）
@@ -86,3 +98,4 @@ adb shell am force-stop com.miui.voiceassist
 | v1.5 | 补 `ActivityThread.handleReceiver/handleBindService` 派发层观测 |
 | v1.6 | 补 `ActivityThread.handleServiceArgs`，定位到唯一汇聚点 |
 | v2 (versionName 2.0) | 重定向上线：拦截改道 + 抑制 + 防抖 + 失败兜底 |
+| v2.1 (versionName 2.1) | 触发源判定：拉起时附 `com.openminis.hook.attach_screen` extra（电源键不截图、小白条手势截图） |
