@@ -1,0 +1,10 @@
+# Gradle
+.gradle/
+build/
+local.properties
+
+# Xposed API 兜底 jar（可从仓库重新下载）
+app/libs/
+
+# macOS
+.DS_Store
