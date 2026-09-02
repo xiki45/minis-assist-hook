@@ -66,6 +66,18 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
     /** 电源键派发携带的标记 extra（实测拓扑：长按电源键的 extras 含该键）。 */
     private static final String EXTRA_POWER_WAKEUP = "app.send.wakeup.command";
 
+    /** 仅用于区分小爱入口来源的已知枚举 extra。 */
+    private static final String EXTRA_VOICE_ASSIST_FUNCTION_KEY = "voice_assist_function_key";
+    private static final String EXTRA_TRIGGER_FROM = "triggerFrom";
+    private static final String EXTRA_TRIGGER_TYPE = "triggerType";
+    private static final String EXTRA_VOICE_ASSIST_START_FROM_KEY = "voice_assist_start_from_key";
+    private static final String[] DIAGNOSTIC_TRIGGER_EXTRAS = {
+            EXTRA_VOICE_ASSIST_FUNCTION_KEY,
+            EXTRA_TRIGGER_FROM,
+            EXTRA_TRIGGER_TYPE,
+            EXTRA_VOICE_ASSIST_START_FROM_KEY
+    };
+
     /** 防抖窗口（毫秒）：该时间内重复唤起只抑制不重复拉起。 */
     private static final long DEBOUNCE_MS = 1200L;
 
@@ -665,6 +677,37 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
         }
         sb.append(", intent.flags=0x").append(Integer.toHexString(intent.getFlags()));
         sb.append(", intent.extrasKeys=").append(extrasKeys(intent));
+        appendTriggerExtraValues(sb, intent);
+    }
+
+    /**
+     * Logs only source-enum extras from redirect candidates; never dumps arbitrary Bundle content.
+     */
+    private static void appendTriggerExtraValues(StringBuilder sb, Intent intent) {
+        if (!isRedirectTarget(intent)) {
+            return;
+        }
+        Bundle extras = intent.getExtras();
+        if (extras == null) {
+            return;
+        }
+        for (String key : DIAGNOSTIC_TRIGGER_EXTRAS) {
+            if (!extras.containsKey(key)) {
+                continue;
+            }
+            sb.append(", extra.").append(key).append('=')
+                    .append(formatDiagnosticExtraValue(extras.get(key)));
+        }
+    }
+
+    private static String formatDiagnosticExtraValue(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof CharSequence || value instanceof Number || value instanceof Boolean) {
+            return String.valueOf(value);
+        }
+        return "<" + value.getClass().getSimpleName() + ">";
     }
 
     /**
