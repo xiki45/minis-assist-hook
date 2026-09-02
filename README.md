@@ -48,6 +48,21 @@ Minis 侧（[xiki45/OpenMinis](https://github.com/xiki45/OpenMinis) `feature/sys
 分支的 `AssistCapture`）读取该 extra；**extra 缺失时默认截图**（兼容旧模块 /
 标准框架路线）。模块本身不做截图——无障碍服务实例在 Minis 进程内，本模块只传信号。
 
+**入口来源白名单（v2.2）**：命中上述目标 intent 后，还需校验唤起来源
+（extras 的 `voice_assist_start_from_key`）是否为本机实测可安全重定向的入口：
+
+| 入口来源 | `voice_assist_start_from_key` | 是否重定向 |
+|---|---|---|
+| 双击小白条 | `double_click_fullscreen_gesture_line` | ✅ |
+| 长按手势条 | `long_press_fullscreen_gesture_line` | ✅ |
+| 长按电源键 | `long_press_power_key` | ✅ |
+| 其它 / 未知 | 不匹配以上 | ❌ 交还原生小爱兜底 |
+
+未知来源时模块**不抑制、不拉起**，只记一行日志后让小爱照常处理，避免误伤其它
+唤起路径。同时日志只输出已知来源枚举 extra（`voice_assist_function_key` /
+`triggerFrom` / `triggerType` / `voice_assist_start_from_key`），不 dump 任意
+Bundle 内容。
+
 不杀小爱进程、不碰其它组件；MiPush 等无关 service 启动不受影响。
 
 - 日志 TAG：`MinisHook`（logcat + XposedBridge 双通道）
@@ -99,3 +114,4 @@ adb shell am force-stop com.miui.voiceassist
 | v1.6 | 补 `ActivityThread.handleServiceArgs`，定位到唯一汇聚点 |
 | v2 (versionName 2.0) | 重定向上线：拦截改道 + 抑制 + 防抖 + 失败兜底 |
 | v2.1 (versionName 2.1) | 触发源判定：拉起时附 `com.openminis.hook.attach_screen` extra（电源键不截图、小白条手势截图） |
+| v2.2 (versionName 2.2) | 入口来源白名单：仅 `voice_assist_start_from_key` 命中实测三种入口才重定向，未知来源交还小爱兜底；触发源诊断日志只输出来源枚举 extra |
