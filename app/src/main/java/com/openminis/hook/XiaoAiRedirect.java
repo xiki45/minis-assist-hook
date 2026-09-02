@@ -78,7 +78,12 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
             EXTRA_VOICE_ASSIST_START_FROM_KEY
     };
 
-    /** 防抖窗口（毫秒）：该时间内重复唤起只抑制不重复拉起。 */
+    /** 实测可安全重定向到 Minis 的小爱入口来源。 */
+    private static final String SOURCE_DOUBLE_CLICK_GESTURE = "double_click_fullscreen_gesture_line";
+    private static final String SOURCE_LONG_PRESS_GESTURE = "long_press_fullscreen_gesture_line";
+    private static final String SOURCE_LONG_PRESS_POWER = "long_press_power_key";
+
+    /** 防抖窗口（毫秒）：该时间内重复触发只抑制不重复拉起。 */
     private static final long DEBOUNCE_MS = 1200L;
 
     /** 上次重定向时间（elapsedRealtime），用于防抖。 */
@@ -328,6 +333,23 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
     }
 
     /**
+     * 仅放行已在本机验证的手势与电源键入口。未知来源交还给原生小爱。
+     */
+    private static boolean isAllowedTriggerSource(Intent intent) {
+        if (intent == null) {
+            return false;
+        }
+        try {
+            String source = intent.getStringExtra(EXTRA_VOICE_ASSIST_START_FROM_KEY);
+            return SOURCE_DOUBLE_CLICK_GESTURE.equals(source)
+                    || SOURCE_LONG_PRESS_GESTURE.equals(source)
+                    || SOURCE_LONG_PRESS_POWER.equals(source);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
      * 在 ActivityThread.handleServiceArgs 回调里执行重定向逻辑。
      *
      * <p>仅在 REDIRECT_ENABLED 且命中目标时动作：防抖、从 ServiceArgsData 的 token 经
@@ -341,6 +363,14 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
         Object data = param.args[0];
         Intent intent = readIntentField(data);
         if (!isRedirectTarget(intent)) {
+            return;
+        }
+        if (!isAllowedTriggerSource(intent)) {
+            String msg = "[redirect] source not whitelisted, keep xiaomi fallback (source="
+                    + formatDiagnosticExtraValue(intent.getStringExtra(EXTRA_VOICE_ASSIST_START_FROM_KEY))
+                    + ")";
+            Log.i(TAG, msg);
+            XposedBridge.log(TAG + " " + msg);
             return;
         }
 
