@@ -63,6 +63,15 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
      */
     public static final String EXTRA_ATTACH_SCREEN = "com.openminis.hook.attach_screen";
 
+    /**
+     * [v2.4 · T-assist-trigger-id] 每次手势的唯一标记（elapsedRealtime）。
+     *
+     * <p>历史上 hook 与 Minis 各用一套"时间窗"去重（1200ms / 1500ms），两者不一致，
+     * 落在中间的手势会被两边同时吞掉、用户端零反馈。改成"同一次唤起 = 同一个 id"：
+     * Minis 只丢弃"同一个 id 的重复投递"，不同 id 的手势永远处理。</p>
+     */
+    public static final String EXTRA_TRIGGER_ID = "com.openminis.hook.trigger_id";
+
     /** 电源键派发携带的标记 extra（实测拓扑：长按电源键的 extras 含该键）。 */
     private static final String EXTRA_POWER_WAKEUP = "app.send.wakeup.command";
 
@@ -89,6 +98,26 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
     /** 上次重定向时间（elapsedRealtime），用于防抖。 */
     private static long sLastRedirectElapsed = 0L;
 
+    /**
+     * [v2.3 · T-ams-accounting] `VoiceService.onStartCommand` 层的 hook 是否装上。
+     *
+     * <p>装上了就**不再**在 `ActivityThread.handleServiceArgs` 里 return-early：
+     * 那一层是 void 方法，return-early 会连带跳过方法体末尾的
+     * `serviceDoneExecuting(...)`，导致 AMS 的 executeNesting 只增不减（实测每手势 +1，
+     * 20s 后 `am_anr: executing service ...VoiceService, waited 20001ms`）。</p>
+     *
+     * <p>没装上时退回旧行为（本层 return-early + 手动补账），保证任何 ROM 上都不会
+     * 因为找不到类而失去"小爱不弹"的能力。</p>
+     */
+    private static volatile boolean sOnStartCommandHookActive = false;
+
+    /** handleInvocation() 的三态返回值。 */
+    private static final int INV_NOT_TARGET = 0;
+    /** 命中目标但本次被防抖 / 需要抑制，不拉起。 */
+    private static final int INV_SUPPRESS_ONLY = 1;
+    /** 已拉起 Minis，需要抑制原生调用。 */
+    private static final int INV_LAUNCHED = 2;
+
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
@@ -104,6 +133,7 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
         hookActivityThreadReceiver(lpparam.classLoader);
         hookActivityThreadBindService(lpparam.classLoader);
         hookActivityThreadServiceArgs(lpparam.classLoader);
+        hookVoiceServiceOnStartCommand(lpparam.classLoader);
         hookVoiceServiceHandleIntent(lpparam.classLoader);
     }
 
@@ -231,8 +261,14 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             logServiceArgsData("ActivityThread.handleServiceArgs", param);
+                            // [v2.3] 优先在 VoiceService.onStartCommand 层抑制：那一层
+                            // return 不影响框架发 serviceDoneExecuting，AMS 记账不会泄漏。
+                            // 只有那一层没装上（类/方法名对不上）才退回本层的 return-early。
+                            if (sOnStartCommandHookActive) {
+                                return;
+                            }
                             try {
-                                maybeRedirect(param);
+                                maybeRedirectFromServiceArgs(param);
                             } catch (Throwable t) {
                                 Log.e(TAG, "[redirect] maybeRedirect crashed: " + t, t);
                                 XposedBridge.log(TAG + " [redirect] maybeRedirect crashed: " + t);
@@ -240,6 +276,71 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
                         }
                     });
         } catch (Throwable t) {
+            logHookFailure(hookPoint, t);
+        }
+    }
+
+    /**
+     * [v2.3 · 方案 A] 在 `VoiceService.onStartCommand` 层抑制小爱的 UI。
+     *
+     * <p>为什么不在 `ActivityThread.handleServiceArgs` 层做：那是 `void` 方法，
+     * Xposed 的 `setResult(...)` 等于 return-early，会跳过方法体末尾的
+     * `QueuedWork.waitToFinish()` 与 `serviceDoneExecuting(...)`。AMS 侧
+     * `sendServiceArgsLocked` 已经 bump 过 executeNesting，只能靠 serviceDoneExecuting
+     * 扣回 —— 不扣就永远不归零（实测每手势 +1，20s 后
+     * `am_anr: executing service ...VoiceService, waited 20001ms`，随后进程被杀）。</p>
+     *
+     * <p>在 onStartCommand 层 `setResult(START_STICKY)` 只跳过 App 自己的这次处理，
+     * 框架照样把 serviceDoneExecuting 发完，记账闭合。</p>
+     */
+    private void hookVoiceServiceOnStartCommand(ClassLoader classLoader) {
+        String hookPoint = "VoiceService.onStartCommand";
+        try {
+            Class<?> vs = XposedHelpers.findClass("com.xiaomi.voiceassistant.VoiceService", classLoader);
+            if (vs == null) {
+                sOnStartCommandHookActive = false;
+                logHookFailure(hookPoint, new IllegalStateException("VoiceService class not found"));
+                return;
+            }
+            Set<XC_MethodHook.Unhook> unhooks = XposedBridge.hookAllMethods(vs, "onStartCommand",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                if (!(param.thisObject instanceof Service)) {
+                                    return;
+                                }
+                                Intent intent = null;
+                                if (param.args != null && param.args.length > 0
+                                        && param.args[0] instanceof Intent) {
+                                    intent = (Intent) param.args[0];
+                                }
+                                int startId = -1;
+                                if (param.args != null && param.args.length > 2
+                                        && param.args[2] instanceof Integer) {
+                                    startId = (Integer) param.args[2];
+                                }
+                                int r = handleInvocation(intent, (Service) param.thisObject, startId);
+                                if (r != INV_NOT_TARGET) {
+                                    // START_STICKY(1) 而不是 NOT_STICKY(2)：后者在
+                                    // startId == lastStartId 时会置 r.stopIfKilled=true，
+                                    // 改变小爱被杀后是否重启的行为，这里不碰。
+                                    param.setResult(Service.START_STICKY);
+                                }
+                            } catch (Throwable t) {
+                                Log.e(TAG, "[redirect] onStartCommand hook crashed: " + t, t);
+                                XposedBridge.log(TAG + " [redirect] onStartCommand hook crashed: " + t);
+                            }
+                        }
+                    });
+            int count = (unhooks == null) ? 0 : unhooks.size();
+            sOnStartCommandHookActive = count > 0;
+            String msg = "[" + hookPoint + "] hooked " + count + " overload(s), serviceArgs fallback="
+                    + (!sOnStartCommandHookActive);
+            Log.i(TAG, msg);
+            XposedBridge.log(TAG + " " + msg);
+        } catch (Throwable t) {
+            sOnStartCommandHookActive = false;
             logHookFailure(hookPoint, t);
         }
     }
@@ -356,14 +457,39 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
      * ActivityThread.mServices 取出 Service 实例作为 Context 启动 Minis，成功后抑制原始
      * 调用；任何失败都只打错误日志，不抑制原始调用（保持小爱可用作为兜底）。</p>
      */
-    private static void maybeRedirect(XC_MethodHook.MethodHookParam param) {
+    /** 测试/兜底入口：只在 onStartCommand 层没装上时使用（见 sOnStartCommandHookActive）。 */
+    private static void maybeRedirectFromServiceArgs(XC_MethodHook.MethodHookParam param) {
         if (!REDIRECT_ENABLED) {
             return;
         }
-        Object data = param.args[0];
+        Object data = (param.args != null && param.args.length > 0) ? param.args[0] : null;
         Intent intent = readIntentField(data);
-        if (!isRedirectTarget(intent)) {
+        int startId = -1;
+        try {
+            startId = XposedHelpers.getIntField(data, "startId");
+        } catch (Throwable t) {
+            // 读不到就用 -1（补账会跳过）
+        }
+        Service svc = resolveService(data);
+        int r = handleInvocation(intent, svc, startId);
+        if (r == INV_NOT_TARGET) {
             return;
+        }
+        // 命中目标：抑制并在 return-early 之前把 AMS 的账补上
+        suppressOriginal(param, startId);
+    }
+
+    /**
+     * 一次唤起是否要改道的唯一判断点（两层 hook 共用）。
+     *
+     * @param svc     触发这次派发的 Service 实例；null 表示调用方是 handleServiceArgs，
+     *                需要自己从 ServiceArgsData 里解析。
+     * @param startId onStartCommand / ServiceArgsData 的 startId，仅用于日志与补账。
+     * @return {@link #INV_NOT_TARGET} / {@link #INV_SUPPRESS_ONLY} / {@link #INV_LAUNCHED}
+     */
+    private static int handleInvocation(Intent intent, Service svc, int startId) {
+        if (!REDIRECT_ENABLED || !isRedirectTarget(intent)) {
+            return INV_NOT_TARGET;
         }
         if (!isAllowedTriggerSource(intent)) {
             String msg = "[redirect] source not whitelisted, keep xiaomi fallback (source="
@@ -371,37 +497,28 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
                     + ")";
             Log.i(TAG, msg);
             XposedBridge.log(TAG + " " + msg);
-            return;
+            return INV_NOT_TARGET;
         }
 
-        int startId = -1;
-        try {
-            startId = XposedHelpers.getIntField(data, "startId");
-        } catch (Throwable t) {
-            // 忽略，startId 读不到则用 -1
-        }
-
-        // 防抖：1200ms 内重复触发只抑制不重复拉起
         long now = SystemClock.elapsedRealtime();
         if (now - sLastRedirectElapsed < DEBOUNCE_MS) {
             String msg = "[redirect] debounced";
             Log.i(TAG, msg);
             XposedBridge.log(TAG + " " + msg);
-            suppressOriginal(param, startId);
-            return;
+            return INV_SUPPRESS_ONLY;
         }
 
-        // 从 ServiceArgsData 拿 Service 实例作为 Context
-        Service svc = resolveService(data);
-        if (svc == null) {
+        Service host = svc;
+        if (host == null) {
             logRedirectError(startId, new IllegalStateException("could not resolve Service instance"));
-            return;
+            return INV_NOT_TARGET;
         }
 
         try {
             // [v2.1] 触发源判定：电源键唤起（原始 extras 含 app.send.wakeup.command）
             // 视为快速提问 → 不附带屏幕截图；双击小白条等其余手势 → 附带。
             boolean attachScreen = !intent.hasExtra(EXTRA_POWER_WAKEUP);
+            long triggerId = now;
 
             Intent launch = new Intent();
             launch.setComponent(new ComponentName(MINIS_PACKAGE, MINIS_ACTIVITY));
@@ -410,26 +527,83 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             launch.putExtra(EXTRA_ATTACH_SCREEN, attachScreen);
-            svc.startActivity(launch);
+            launch.putExtra(EXTRA_TRIGGER_ID, triggerId);
+            host.startActivity(launch);
 
             sLastRedirectElapsed = SystemClock.elapsedRealtime();
-            suppressOriginal(param, startId);
             String msg = "[redirect] launched Minis, suppressed xiaomi (startId=" + startId
-                    + ", attachScreen=" + attachScreen + ")";
+                    + ", attachScreen=" + attachScreen + ", triggerId=" + triggerId + ")";
             Log.i(TAG, msg);
             XposedBridge.log(TAG + " " + msg);
+            return INV_LAUNCHED;
         } catch (Throwable t) {
             logRedirectError(startId, t);
+            return INV_NOT_TARGET;
         }
     }
 
-    /** 抑制原始调用（让小爱不显示）。 */
+    /**
+     * 抑制原始调用（让小爱不显示）。
+     *
+     * [v2.3 · T-ams-accounting] `param.setResult(...)` 会把 void 的
+     * `ActivityThread.handleServiceArgs` 整个方法体跳过 —— 连同方法体末尾那句
+     * `ActivityManager.getService().serviceDoneExecuting(token, SERVICE_ARGS, startId, res)`
+     * 一起跳过。AMS 侧 `sendServiceArgsLocked` 已经 `bumpServiceExecutingLocked()`
+     * （executeNesting+1、executingStart 刷新），只能靠 serviceDoneExecuting 扣回；
+     * 不补发就会 executeNesting 只增不减，20s 后触发
+     * `appNotResponding("executing service ...VoiceService")`（实测：
+     * am_anr waited 20001ms，进程随后被杀）。
+     *
+     * 这里在 return-early 之前手动补发同一句，把 AMS 的记账闭合。
+     * 补发失败只记日志，行为与旧版完全一致（不引入新的失败面）。
+     */
     private static void suppressOriginal(XC_MethodHook.MethodHookParam param, int startId) {
         try {
+            completeServiceArgs(param, startId);
             param.setResult(0);
         } catch (Throwable t) {
             Log.w(TAG, "[redirect] suppressOriginal failed (startId=" + startId + "): " + t);
             XposedBridge.log(TAG + " [redirect] suppressOriginal failed: " + t);
+        }
+    }
+
+    /**
+     * 补发 `IActivityManager.serviceDoneExecuting(token, SERVICE_DONE_EXECUTING_START, startId, res)`。
+     *
+     * res 只能是 0..4（AMS `ActiveServices` 会校验，越界抛
+     * IllegalArgumentException: Unknown service start result），这里用
+     * START_STICKY(1)：START_NOT_STICKY 在 startId == lastStartId 时会置
+     * r.stopIfKilled=true，不适合一个被我们"代跑"掉的启动。
+     */
+    private static void completeServiceArgs(XC_MethodHook.MethodHookParam param, int startId) {
+        if (startId < 0 || param.args == null || param.args.length == 0) {
+            return;
+        }
+        Object token;
+        try {
+            token = XposedHelpers.getObjectField(param.args[0], "token");
+        } catch (Throwable t) {
+            return;
+        }
+        if (!(token instanceof android.os.IBinder)) {
+            return;
+        }
+        try {
+            Object am = XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("android.app.ActivityManager", null), "getService");
+            if (am == null) {
+                return;
+            }
+            XposedHelpers.callMethod(am, "serviceDoneExecuting",
+                    new Class<?>[]{ android.os.IBinder.class, int.class, int.class, int.class },
+                    token,
+                    /* SERVICE_DONE_EXECUTING_START */ 1,
+                    startId,
+                    /* Service.START_STICKY */ 1);
+        } catch (Throwable t) {
+            Log.w(TAG, "[redirect] serviceDoneExecuting compensation failed (startId="
+                    + startId + "): " + t);
+            XposedBridge.log(TAG + " [redirect] serviceDoneExecuting compensation failed: " + t);
         }
     }
 
