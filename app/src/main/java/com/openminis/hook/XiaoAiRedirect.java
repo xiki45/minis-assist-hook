@@ -32,6 +32,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * <p>保留 v1 的全部日志 hook（Activity/Service/handleReceiver/handleBindService/
  * handleIntent 发现）与日志函数；handleServiceArgs 中即使不重定向也保持原有日志输出。</p>
  *
+ * <p>v2.5：拉起 Minis 时除 {@code attach_screen}/{@code trigger_id} 外，再透传本次唤起的
+ * 来源枚举（{@link #EXTRA_TRIGGER_SOURCE}）与模块协议版本（{@link #EXTRA_HOOK_VERSION}），
+ * 并把截图判定改为按来源枚举（{@link #attachScreenFor}）而非电源键专有 extra。</p>
+ *
  * <p>如何关闭：编译期把 {@link #REDIRECT_ENABLED} 改为 false 重新构建；或通过
  * vector-cli modules disable com.openminis.hook 后 am force-stop com.miui.voiceassist。</p>
  */
@@ -72,7 +76,34 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
      */
     public static final String EXTRA_TRIGGER_ID = "com.openminis.hook.trigger_id";
 
-    /** 电源键派发携带的标记 extra（实测拓扑：长按电源键的 extras 含该键）。 */
+    /**
+     * [v2.5 · T-hook-trigger-source] 本次唤起的**来源枚举**，原样透传
+     * `voice_assist_start_from_key` 的取值。
+     *
+     * <p>v2.2 起这个 extra 只参与入口白名单校验 —— 用来判断"放不放行"，
+     * 拉起 Minis 时却把它丢掉了。Minis 侧因此只能从 {@code attach_screen} 反推
+     * "是不是电源键"，日志里也没有来源，排障要靠人肉对照时间戳。透传之后：
+     * 会话元数据、日志、以及以后按来源收紧行为（例如手势条长按不自动截图）都有依据。</p>
+     */
+    public static final String EXTRA_TRIGGER_SOURCE = "com.openminis.hook.trigger_source";
+
+    /**
+     * [v2.5 · T-hook-version] 模块侧协议版本（整数，不是 versionName）。
+     *
+     * <p>Minis 侧把它写进日志：出问题时一眼看出这条唤起是哪个模块版本投递的，
+     * 不必再问"你装的是几版"。以后新增 extra / 改语义就递增。</p>
+     */
+    public static final String EXTRA_HOOK_VERSION = "com.openminis.hook.version";
+
+    /** 当前协议版本：1 = 透传 trigger_source + hook_version（v2.5 起）。 */
+    public static final int HOOK_PROTOCOL_VERSION = 1;
+
+    /**
+     * 电源键派发携带的标记 extra（实测拓扑：长按电源键的 extras 含该键）。
+     *
+     * <p>v2.5 起截图判定改用来源枚举（[#SOURCE_LONG_PRESS_POWER]），这个键只留在
+     * 日志里当交叉印证用；来源枚举读不到时才回退到它。</p>
+     */
     private static final String EXTRA_POWER_WAKEUP = "app.send.wakeup.command";
 
     /** 仅用于区分小爱入口来源的已知枚举 extra。 */
@@ -434,20 +465,44 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
     }
 
     /**
-     * 仅放行已在本机验证的手势与电源键入口。未知来源交还给原生小爱。
+     * 读回可放行的入口来源枚举；不在白名单内一律返回 {@code null}。
+     *
+     * <p>返回值同时是 v2.5 透传给 Minis 的 [EXTRA_TRIGGER_SOURCE]：放行与透传用
+     * 同一份判定，不会出现"校验过的来源"和"告诉 Minis 的来源"不一致。</p>
      */
-    private static boolean isAllowedTriggerSource(Intent intent) {
+    private static String readTriggerSource(Intent intent) {
         if (intent == null) {
-            return false;
+            return null;
         }
         try {
             String source = intent.getStringExtra(EXTRA_VOICE_ASSIST_START_FROM_KEY);
-            return SOURCE_DOUBLE_CLICK_GESTURE.equals(source)
+            if (SOURCE_DOUBLE_CLICK_GESTURE.equals(source)
                     || SOURCE_LONG_PRESS_GESTURE.equals(source)
-                    || SOURCE_LONG_PRESS_POWER.equals(source);
+                    || SOURCE_LONG_PRESS_POWER.equals(source)) {
+                return source;
+            }
+            return null;
         } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * [v2.5] 本次是否附带当前屏幕截图。
+     *
+     * <p>长按电源键是"快速提问"，用户要的是立刻能说话，不要一张屏幕；双击 / 长按
+     * 手势条是"屏幕即现场"，默认附带。以前只能靠 {@code app.send.wakeup.command}
+     * 这个电源键专有 extra 反推，现在来源枚举已经是白名单的副产物，直接按它判定；
+     * 万一枚举缺失（白名单理论上已挡住），再退回旧启发式。</p>
+     */
+    private static boolean attachScreenFor(Intent intent, String source) {
+        if (SOURCE_LONG_PRESS_POWER.equals(source)) {
             return false;
         }
+        if (SOURCE_DOUBLE_CLICK_GESTURE.equals(source) || SOURCE_LONG_PRESS_GESTURE.equals(source)) {
+            return true;
+        }
+        return intent == null || !intent.hasExtra(EXTRA_POWER_WAKEUP);
     }
 
     /**
@@ -491,9 +546,11 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
         if (!REDIRECT_ENABLED || !isRedirectTarget(intent)) {
             return INV_NOT_TARGET;
         }
-        if (!isAllowedTriggerSource(intent)) {
+        String source = readTriggerSource(intent);
+        if (source == null) {
             String msg = "[redirect] source not whitelisted, keep xiaomi fallback (source="
-                    + formatDiagnosticExtraValue(intent.getStringExtra(EXTRA_VOICE_ASSIST_START_FROM_KEY))
+                    + formatDiagnosticExtraValue(
+                            intent == null ? null : intent.getStringExtra(EXTRA_VOICE_ASSIST_START_FROM_KEY))
                     + ")";
             Log.i(TAG, msg);
             XposedBridge.log(TAG + " " + msg);
@@ -502,7 +559,7 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
 
         long now = SystemClock.elapsedRealtime();
         if (now - sLastRedirectElapsed < DEBOUNCE_MS) {
-            String msg = "[redirect] debounced";
+            String msg = "[redirect] debounced (source=" + source + ")";
             Log.i(TAG, msg);
             XposedBridge.log(TAG + " " + msg);
             return INV_SUPPRESS_ONLY;
@@ -515,9 +572,9 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
         }
 
         try {
-            // [v2.1] 触发源判定：电源键唤起（原始 extras 含 app.send.wakeup.command）
-            // 视为快速提问 → 不附带屏幕截图；双击小白条等其余手势 → 附带。
-            boolean attachScreen = !intent.hasExtra(EXTRA_POWER_WAKEUP);
+            // [v2.5] 截图判定改为按来源枚举：长按电源键＝快速提问不截图，
+            // 双击 / 长按手势条＝"屏幕即现场"截图（见 attachScreenFor）。
+            boolean attachScreen = attachScreenFor(intent, source);
             long triggerId = now;
 
             Intent launch = new Intent();
@@ -528,11 +585,18 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             launch.putExtra(EXTRA_ATTACH_SCREEN, attachScreen);
             launch.putExtra(EXTRA_TRIGGER_ID, triggerId);
+            // [v2.5] 把"是哪只手势"和"哪个模块协议版本"一起交给 Minis：
+            // 前者进会话元数据/日志，后者让现场日志能自证模块版本。
+            launch.putExtra(EXTRA_TRIGGER_SOURCE, source);
+            launch.putExtra(EXTRA_HOOK_VERSION, HOOK_PROTOCOL_VERSION);
             host.startActivity(launch);
 
             sLastRedirectElapsed = SystemClock.elapsedRealtime();
             String msg = "[redirect] launched Minis, suppressed xiaomi (startId=" + startId
-                    + ", attachScreen=" + attachScreen + ", triggerId=" + triggerId + ")";
+                    + ", source=" + source
+                    + ", attachScreen=" + attachScreen
+                    + ", triggerId=" + triggerId
+                    + ", protocol=" + HOOK_PROTOCOL_VERSION + ")";
             Log.i(TAG, msg);
             XposedBridge.log(TAG + " " + msg);
             return INV_LAUNCHED;

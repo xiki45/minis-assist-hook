@@ -33,20 +33,47 @@ component= com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService
 
 1. 命中上述目标 intent → 用 `Service` 实例作为 Context 拉起
    `com.openminis.app/.MainActivityVoiceAssist`（VOICE_ASSIST 全屏入口）；
-2. `param.setResult(0)` 抑制原始调用，小爱浮窗不显示；
+2. 抑制原始调用，小爱浮窗不显示（v2.3 起抑制点在 `onStartCommand` 层，见下）；
 3. 1200ms 防抖；任何一步失败则**不抑制**，小爱兜底照常可用。
 
-**触发源判定（v2.1）**：按原始 intent 的 extras 区分唤起来源，并在拉起 intent 上附加
-`com.openminis.hook.attach_screen`（Boolean）供 Minis 侧决定是否截屏：
+**抑制落点（v2.3）**：`handleServiceArgs` 是 void 方法，在派发层 return-early 会连带跳过
+方法体末尾的 `serviceDoneExecuting(...)`，AMS 的 `executeNesting` 只增不减（实测每手势 +1，
+20s 后 `am_anr: executing service ...VoiceService, waited 20001ms`）。因此 v2.3 起改在
+`VoiceService.onStartCommand` 层抑制（`param.setResult(START_STICKY)`，避免 NOT_STICKY 的
+`stopIfKilled` 改变小爱被杀后是否重启），派发层只记账；该 hook 没能装上时退回旧路径并手动补账，
+保证任何 ROM 上都不会因找不到类而失去"小爱不弹"。
 
-| 触发 | 判定依据 | attach_screen | Minis 行为 |
+**触发源判定（v2.1，v2.5 起按来源枚举）**：按唤起来源决定拉起 Minis 时是否附带屏幕截图：
+
+| 触发 | `voice_assist_start_from_key` | `attach_screen` | Minis 行为 |
 |---|---|---|---|
-| 长按电源键 | extras 含 `app.send.wakeup.command` | `false` | 快速提问，不附带屏幕截图 |
-| 双击小白条等手势 | 其余命中 | `true` | 唤起时自动附当前屏幕截图 |
+| 长按电源键 | `long_press_power_key` | `false` | 快速提问，不附带屏幕截图 |
+| 双击小白条 | `double_click_fullscreen_gesture_line` | `true` | 唤起时自动附当前屏幕截图 |
+| 长按手势条 | `long_press_fullscreen_gesture_line` | `true` | 同上 |
+
+v2.1 靠"extras 里有没有 `app.send.wakeup.command`"反推电源键，v2.5 起直接用白名单校验
+产出的来源枚举判定（`attachScreenFor()`），电源键那个 extra 只留在日志里做交叉印证，
+枚举意外缺失时才回退旧启发式。
 
 Minis 侧（[xiki45/OpenMinis](https://github.com/xiki45/OpenMinis) `feature/system-assist`
 分支的 `AssistCapture`）读取该 extra；**extra 缺失时默认截图**（兼容旧模块 /
 标准框架路线）。模块本身不做截图——无障碍服务实例在 Minis 进程内，本模块只传信号。
+
+### 拉起 Minis 时透传的 extras
+
+模块只"投递信号"，所有决策都在 Minis 侧。当前协议版本 **1**（`HOOK_PROTOCOL_VERSION`）：
+
+| extra | 类型 | 起始版本 | 含义 |
+|---|---|---|---|
+| `com.openminis.hook.attach_screen` | `boolean` | v2.1 | 本次是否附带当前屏幕截图（电源键 `false`，手势 `true`） |
+| `com.openminis.hook.trigger_id` | `long` | v2.4 | 本次唤起的唯一标记（`elapsedRealtime`），同一次唤起重复投递时 id 相同，供 Minis 精确去重 |
+| `com.openminis.hook.trigger_source` | `String` | v2.5 | 来源枚举，原样透传 `voice_assist_start_from_key`（见上表三值） |
+| `com.openminis.hook.version` | `int` | v2.5 | 模块侧协议版本，Minis 写进日志，现场日志可自证模块版本 |
+
+`trigger_source` / `version` 是 v2.5 新增：此前来源枚举只用于"放不放行"，拉起时被丢弃，
+Minis 只能从 `attach_screen` 反推手势类型，日志里没有来源、排障要靠人肉对时间戳。
+透传后会话元数据、日志以及后续按来源收紧行为（例如"长按手势条不自动截图"）都有依据。
+旧版 Minis 忽略这两个 extra，不影响兼容。
 
 **入口来源白名单（v2.2）**：命中上述目标 intent 后，还需校验唤起来源
 （extras 的 `voice_assist_start_from_key`）是否为本机实测可安全重定向的入口：
@@ -115,3 +142,6 @@ adb shell am force-stop com.miui.voiceassist
 | v2 (versionName 2.0) | 重定向上线：拦截改道 + 抑制 + 防抖 + 失败兜底 |
 | v2.1 (versionName 2.1) | 触发源判定：拉起时附 `com.openminis.hook.attach_screen` extra（电源键不截图、小白条手势截图） |
 | v2.2 (versionName 2.2) | 入口来源白名单：仅 `voice_assist_start_from_key` 命中实测三种入口才重定向，未知来源交还小爱兜底；触发源诊断日志只输出来源枚举 extra |
+| v2.3 (versionName 2.3) | 抑制落点下移到 `VoiceService.onStartCommand`，修掉派发层 return-early 造成的 `executeNesting` 泄漏与 `waited 20001ms` ANR；找不到该类时自动退回旧路径 |
+| v2.4 (versionName 2.4) | 透传 `com.openminis.hook.trigger_id`（每次唤起唯一 id），替代两边各自的时间窗去重 |
+| v2.5 (versionName 2.5) | 透传 `com.openminis.hook.trigger_source` + `com.openminis.hook.version`（协议版本 1）；`attach_screen` 改由来源枚举判定；日志补 `source=/protocol=` |
