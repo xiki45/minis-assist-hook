@@ -1,6 +1,7 @@
 package com.openminis.hook;
 
 import android.app.Activity;
+import android.app.Application;
 import android.app.Service;
 import android.content.ComponentName;
 import android.content.Context;
@@ -44,7 +45,7 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
     private static final String TAG = "MinisHook";
 
     /** v2 启用重定向；关闭时仅日志（编译期修改后重新构建）。 */
-    public static final boolean REDIRECT_ENABLED = true;
+    public static final boolean REDIRECT_ENABLED = false;
 
     private static final String TARGET_PACKAGE = "com.miui.voiceassist";
 
@@ -166,6 +167,24 @@ public class XiaoAiRedirect implements IXposedHookLoadPackage {
         hookActivityThreadServiceArgs(lpparam.classLoader);
         hookVoiceServiceOnStartCommand(lpparam.classLoader);
         hookVoiceServiceHandleIntent(lpparam.classLoader);
+
+        // [v3] 内容旁路：不再改道，改为把"手势唤起 + 会话内容"投给 Minis 上游的分享入口。
+        AssistRelay.install(lpparam.classLoader);
+        hookApplicationOnCreate();
+    }
+
+    /** [v3] 给 AssistRelay 一个 Application Context（用于 startActivity 投递）。 */
+    private void hookApplicationOnCreate() {
+        try {
+            XposedHelpers.findAndHookMethod(Application.class, "onCreate", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    AssistRelay.onApplicationCreate((Application) param.thisObject);
+                }
+            });
+        } catch (Throwable t) {
+            logHookFailure("Application.onCreate", t);
+        }
     }
 
     private void hookActivity() {
