@@ -98,6 +98,8 @@ public final class AssistRelay {
     public static final boolean FORWARD_SPEECH_QUERY = false;
     /** 仅供 adb 联调：唤起 intent 里带 {@code minis_relay_attach_uri=<content uri>} 时直接挂一个附件。 */
     public static final boolean DEBUG_ATTACH_FROM_INTENT = true;
+    /** "打字 + 附件"链路的诊断日志（只打印、不改行为），摸清路径后可以关掉。 */
+    public static final boolean DIAG_MEDIA_SEND = true;
 
     /** 一次会话的内容转发窗口。 */
     private static final long SESSION_TTL_MS = 120_000L;
@@ -738,6 +740,113 @@ public final class AssistRelay {
         hookMultimodalSend(cl, "sh0.u0", "doc.send");
         hookMultimodalSend(cl, "sh0.e0", "upload.send");
         hookMultimodalSend(cl, "sh0.u1", "web.send");
+
+        // 管理器层：we0.l#W(输入框文本) → n1.sendMultimodalUnderstandWithCard(text)
+        // 这是"打字 + 附件"最可能的真实出口，直接在这里兜一次投递。
+        hookManagerSend(cl, "sh0.n1", "sendMultimodalUnderstandWithCard", 1, 0);
+        hookManagerSend(cl, "sh0.n1", "sendMultimodalUnderstandWithCard", 2, 0);
+
+        if (DIAG_MEDIA_SEND) {
+            // 只打印的诊断点：确认"打字 + 附件"到底从哪儿过的。
+            diagHook(cl, "we0.l", "W", 1);
+            diagHook(cl, "we0.l", "X", 1);
+            diagHook(cl, "sh0.n1", "saveMultimodalToQueryInfo", 2);
+            diagHook(cl, "sh0.n1", "notifyQueryText", 2);
+            diagHook(cl, "oh0.t", "sendMultimodalUnderstandWithCard", 2);
+            diagHook(cl, "x20.i0", "startServiceQuery", 1);
+            diagHook(cl, "x20.i0", "startQuery", 3);
+        }
+    }
+
+    /** 管理器层"发送"：参数里某个 String 就是用户输入的文本。 */
+    private static void hookManagerSend(ClassLoader cl, String className, String methodName,
+                                        int argCount, final int textIndex) {
+        try {
+            Class<?> c = XposedHelpers.findClass(className, cl);
+            int hooked = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!methodName.equals(m.getName()) || m.getParameterTypes().length != argCount) {
+                    continue;
+                }
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            String query = textOf(param.args, textIndex);
+                            log("media.send " + className + "." + methodName + " query=" + query);
+                            deliverQuery(query, "media.send");
+                        } catch (Throwable t) {
+                            log("media.send err " + t);
+                        }
+                    }
+                });
+                hooked++;
+            }
+            log("hook " + (hooked > 0 ? "ok" : "miss") + ": " + className + "." + methodName + "/" + argCount);
+        } catch (Throwable t) {
+            log("hook skip: " + className + "." + methodName + " — " + t);
+        }
+    }
+
+    private static String textOf(Object[] args, int index) {
+        if (args == null || index < 0 || index >= args.length) {
+            return "";
+        }
+        Object a = args[index];
+        return a instanceof String ? (String) a : (a == null ? "" : String.valueOf(a));
+    }
+
+    /** 只记日志的探针。 */
+    private static void diagHook(ClassLoader cl, String className, String methodName, int argCount) {
+        try {
+            Class<?> c = XposedHelpers.findClass(className, cl);
+            int hooked = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!methodName.equals(m.getName()) || m.getParameterTypes().length != argCount) {
+                    continue;
+                }
+                final String name = className + "." + methodName;
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            StringBuilder sb = new StringBuilder("diag ").append(name).append('(');
+                            for (Object a : param.args) {
+                                sb.append(describe(a)).append(", ");
+                            }
+                            sb.append(')');
+                            log(sb.toString());
+                        } catch (Throwable t) {
+                            log("diag print err " + t);
+                        }
+                    }
+                });
+                hooked++;
+            }
+            log("diag " + (hooked > 0 ? "ok" : "miss") + ": " + className + "." + methodName + "/" + argCount);
+        } catch (Throwable t) {
+            log("diag skip: " + className + "." + methodName + " — " + t);
+        }
+    }
+
+    private static String describe(Object a) {
+        if (a == null) {
+            return "null";
+        }
+        if (a instanceof String) {
+            return "\"" + a + "\"";
+        }
+        if (a instanceof Boolean || a instanceof Integer || a instanceof Long) {
+            return String.valueOf(a);
+        }
+        if (a instanceof android.widget.EditText) {
+            try {
+                return "EditText[" + ((android.widget.EditText) a).getText() + "]";
+            } catch (Throwable ignored) {
+                return "EditText";
+            }
+        }
+        return a.getClass().getSimpleName();
     }
 
     private static void hookMultimodalSend(ClassLoader cl, String className, final String label) {
