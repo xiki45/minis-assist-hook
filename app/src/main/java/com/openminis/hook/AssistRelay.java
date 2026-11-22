@@ -148,6 +148,7 @@ public final class AssistRelay {
         hookPreWakeup(cl);
         hookSpeechQuery(cl);
         hookMultimodalUpload(cl);
+        hookMultimodalSend(cl);
     }
 
     /* ── 入口层 ───────────────────────────────────────────────────── */
@@ -719,6 +720,55 @@ public final class AssistRelay {
             log("hook " + (hooked > 0 ? "ok" : "miss") + ": sh0.n1.startFileUpload(Uri,type,…)");
         } catch (Throwable t) {
             log("hook skip: sh0.n1.startFileUpload — " + t);
+        }
+    }
+
+    /**
+     * 带附件的"发送"：用户在输入框里发出去（或说完）时，图片/文档走的是
+     * {@code sh0.j#sendMultimodalUnderstand(String query, boolean)}，
+     * 而不是文本会话的 {@code x20.i0.startQuery}——所以这条必须单独挂，
+     * 否则"看图 + 提问"整条消息都看不见（真机 13:57 那次就是这样丢的）。
+     *
+     * <p>实现类：{@code sh0.j1}（图片）、{@code sh0.u0}（文档 V2）、
+     * {@code sh0.e0}、{@code sh0.u1}（网页文本上传）。query 允许为空——
+     * 只发图不配文字也算一次用户消息。</p>
+     */
+    private static void hookMultimodalSend(ClassLoader cl) {
+        hookMultimodalSend(cl, "sh0.j1", "image.send");
+        hookMultimodalSend(cl, "sh0.u0", "doc.send");
+        hookMultimodalSend(cl, "sh0.e0", "upload.send");
+        hookMultimodalSend(cl, "sh0.u1", "web.send");
+    }
+
+    private static void hookMultimodalSend(ClassLoader cl, String className, final String label) {
+        try {
+            Class<?> c = XposedHelpers.findClass(className, cl);
+            int hooked = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                if (!"sendMultimodalUnderstand".equals(m.getName())) {
+                    continue;
+                }
+                Class<?>[] types = m.getParameterTypes();
+                if (types.length != 2 || types[0] != String.class) {
+                    continue;
+                }
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            String query = param.args[0] instanceof String ? (String) param.args[0] : "";
+                            log(label + " send query=" + query);
+                            deliverQuery(query, label);
+                        } catch (Throwable t) {
+                            log(label + " err " + t);
+                        }
+                    }
+                });
+                hooked++;
+            }
+            log("hook " + (hooked > 0 ? "ok" : "miss") + ": " + className + ".sendMultimodalUnderstand/2");
+        } catch (Throwable t) {
+            log("hook skip: " + className + ".sendMultimodalUnderstand — " + t);
         }
     }
 
