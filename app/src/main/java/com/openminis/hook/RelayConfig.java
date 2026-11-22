@@ -30,6 +30,16 @@ public final class RelayConfig {
     public boolean gestureLongPress = false;
     public boolean ubikitouch = false;
     public boolean screenRecognition = false;
+    /* "+"菜单的入口：勾上 = 从这条入口进来的内容会转发 */
+    public boolean entryCamera = true;
+    public boolean entryGallery = true;
+    public boolean entryDocument = true;
+    public boolean entryScreenRecognition = true;
+    /** 屏幕翻译：默认不接管（小爱自己的翻译模式，转发会把整屏翻译打断）。 */
+    public boolean entryTranslate = false;
+    /** 小爱陪伴：默认不接管（视频陪伴模式）。 */
+    public boolean entryCompanion = false;
+
     public boolean media = true;
     public boolean dismiss = true;
     public boolean content = true;
@@ -52,6 +62,12 @@ public final class RelayConfig {
             c.gestureLongPress = o.optBoolean("gestureLongPress", c.gestureLongPress);
             c.ubikitouch = o.optBoolean("ubikitouch", c.ubikitouch);
             c.screenRecognition = o.optBoolean("screenRecognition", c.screenRecognition);
+            c.entryCamera = o.optBoolean("entryCamera", c.entryCamera);
+            c.entryGallery = o.optBoolean("entryGallery", c.entryGallery);
+            c.entryDocument = o.optBoolean("entryDocument", c.entryDocument);
+            c.entryScreenRecognition = o.optBoolean("entryScreenRecognition", c.entryScreenRecognition);
+            c.entryTranslate = o.optBoolean("entryTranslate", c.entryTranslate);
+            c.entryCompanion = o.optBoolean("entryCompanion", c.entryCompanion);
             c.media = o.optBoolean("media", c.media);
             c.dismiss = o.optBoolean("dismiss", c.dismiss);
             c.content = o.optBoolean("content", c.content);
@@ -71,6 +87,12 @@ public final class RelayConfig {
             o.put("gestureLongPress", gestureLongPress);
             o.put("ubikitouch", ubikitouch);
             o.put("screenRecognition", screenRecognition);
+            o.put("entryCamera", entryCamera);
+            o.put("entryGallery", entryGallery);
+            o.put("entryDocument", entryDocument);
+            o.put("entryScreenRecognition", entryScreenRecognition);
+            o.put("entryTranslate", entryTranslate);
+            o.put("entryCompanion", entryCompanion);
             o.put("media", media);
             o.put("dismiss", dismiss);
             o.put("content", content);

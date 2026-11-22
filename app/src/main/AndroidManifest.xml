@@ -22,6 +22,7 @@
         <activity
             android:name=".RelaySettingsActivity"
             android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
             android:label="Minis 转发设置">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

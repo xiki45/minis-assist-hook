@@ -19,6 +19,7 @@ import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -135,6 +136,11 @@ public final class AssistRelay {
     /** 本地副本目录（在小爱 cacheDir 下，正好落在 FileProvider 的 cache_path 根里）。 */
     private static final String MEDIA_DIR = "relay";
 
+    /* "+"菜单入口（相机/相册/文档/识屏/屏幕翻译/小爱陪伴）：决定这次会话要不要接管。 */
+    private static volatile Entry sEntry = Entry.UNKNOWN;
+    private static volatile long sEntryAt;
+    private static final long ENTRY_TTL_MS = 600_000L;
+
     private static final Object MEDIA_LOCK = new Object();
     private static final List<Media> sMedia = new ArrayList<>();
     private static int sMediaSeq;
@@ -156,6 +162,7 @@ public final class AssistRelay {
         hookSpeechQuery(cl);
         hookMultimodalUpload(cl);
         hookMultimodalSend(cl);
+        hookInputEntries(cl);
     }
 
     /* ── 入口层 ───────────────────────────────────────────────────── */
@@ -274,6 +281,9 @@ public final class AssistRelay {
                 + " triggerFrom=" + safeStringExtra(intent, "triggerFrom")
                 + " action=" + intent.getAction());
 
+        // 新会话：上一条会话里点过哪个"+"菜单入口不算数了
+        sEntry = Entry.UNKNOWN;
+        sEntryAt = 0L;
         noteSource(source, "processIntent");
         if (!isForwardable(source)) {
             dropMedia();
@@ -469,6 +479,18 @@ public final class AssistRelay {
         if (!isDeliverable(source)) {
             // 这条链路用户明确说了不转发（ubikitouch / 识屏）。
             log("message skipped via " + from + " (" + source + " not forwarded)");
+            return;
+        }
+        Entry entry = effectiveEntry(null);
+        if (!entryAllowed(entry)) {
+            log("message skipped via " + from + " (entry " + entry + " off)");
+            dropMedia();
+            return;
+        }
+        String mode = blockedMode();
+        if (mode != null) {
+            log("message skipped via " + from + " (" + mode + " 进行中)");
+            dropMedia();
             return;
         }
         if (!text.isEmpty()) {
@@ -686,6 +708,152 @@ public final class AssistRelay {
         }
     }
 
+    /* ── "+"菜单入口：相机 / 相册 / 文档 / 识屏 / 屏幕翻译 / 小爱陪伴 ──
+     *
+     * 这几项不改变"谁唤起的小爱"，而是决定这次会话里小爱要做哪件事。屏幕翻译
+     * 和小爱陪伴是自成一体的模式（全屏翻译、视频陪伴），一旦把用户的话转发走
+     * 再 stopService，等于把人家正在用的功能掐了 —— 所以这两个默认不接管，
+     * 由设置界面的开关控制。
+     */
+
+    enum Entry {
+        CAMERA("相机"),
+        GALLERY("相册"),
+        DOCUMENT("文档"),
+        SCREEN_RECOGNITION("识屏"),
+        TRANSLATE("屏幕翻译"),
+        COMPANION("小爱陪伴"),
+        UNKNOWN("未知");
+
+        final String label;
+
+        Entry(String label) {
+            this.label = label;
+        }
+    }
+
+    private static void hookInputEntries(ClassLoader cl) {
+        hookEntry(cl, "gf0.d0", "onMoreItemCameraClick", Entry.CAMERA);
+        hookEntry(cl, "gf0.d0", "onMoreItemGalleryClick", Entry.GALLERY);
+        hookEntry(cl, "gf0.d0", "onMoreItemDocumentClick", Entry.DOCUMENT);
+        hookEntry(cl, "gf0.d0", "onMoreItemScreenRecognitionClick", Entry.SCREEN_RECOGNITION);
+        hookEntry(cl, "gf0.d0", "onMoreItemTranslationClick", Entry.TRANSLATE);
+        hookEntry(cl, "gf0.d0", "onMoreItemStandbyClick", Entry.COMPANION);
+    }
+
+    private static void hookEntry(ClassLoader cl, String className, String methodName, final Entry entry) {
+        try {
+            Class<?> c = XposedHelpers.findClass(className, cl);
+            int hooked = 0;
+            for (Method m : c.getDeclaredMethods()) {
+                if (!methodName.equals(m.getName())) {
+                    continue;
+                }
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        sEntry = entry;
+                        sEntryAt = SystemClock.elapsedRealtime();
+                        log("entry pick=" + entry + " (" + entry.label + ")");
+                    }
+                });
+                hooked++;
+            }
+            log("hook " + (hooked > 0 ? "ok" : "miss") + ": " + className + "." + methodName + " → " + entry);
+        } catch (Throwable t) {
+            log("hook skip: " + className + "." + methodName + " — " + t);
+        }
+    }
+
+    /** 本次会话点过哪个入口；开启新会话（onWake）时清空。 */
+    private static Entry currentEntry() {
+        if (SystemClock.elapsedRealtime() - sEntryAt > ENTRY_TTL_MS) {
+            return Entry.UNKNOWN;
+        }
+        return sEntry;
+    }
+
+    /** 入口记忆为空时，退一步按附件来源串猜。 */
+    private static Entry effectiveEntry(String from) {
+        Entry entry = currentEntry();
+        if (entry != Entry.UNKNOWN) {
+            return entry;
+        }
+        if (from == null) {
+            return Entry.UNKNOWN;
+        }
+        String f = from.toLowerCase(Locale.ROOT);
+        if (f.contains("identify_screen")) {
+            return Entry.SCREEN_RECOGNITION;
+        }
+        if (f.contains("take_picture")) {
+            return Entry.CAMERA;
+        }
+        if (f.contains("photo")) {
+            return Entry.GALLERY;
+        }
+        return Entry.UNKNOWN;
+    }
+
+    private static boolean entryAllowed(Entry entry) {
+        RelayConfig c = config();
+        switch (entry) {
+            case CAMERA:
+                return c.entryCamera;
+            case GALLERY:
+                return c.entryGallery;
+            case DOCUMENT:
+                return c.entryDocument;
+            case SCREEN_RECOGNITION:
+                return c.entryScreenRecognition;
+            case TRANSLATE:
+                return c.entryTranslate;
+            case COMPANION:
+                return c.entryCompanion;
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * 活着的模式检查：即使入口记忆丢了（比如从 H5 或语音直接进的），
+     * 只要屏幕翻译或小爱陪伴正在跑就一律不接管。
+     *
+     * @return 被挡下的模式名，没挡返回 null
+     */
+    private static String blockedMode() {
+        RelayConfig c = config();
+        ClassLoader loader = sHostLoader;
+        if (loader == null) {
+            return null;
+        }
+        if (!c.entryTranslate) {
+            try {
+                Class<?> cls = XposedHelpers.findClass("e90.g", loader);
+                Object singleton = XposedHelpers.getStaticObjectField(cls, "f69493a");
+                Object open = XposedHelpers.callMethod(singleton, "checkTranslationIsOpen");
+                if (Boolean.TRUE.equals(open)) {
+                    return Entry.TRANSLATE.label;
+                }
+            } catch (Throwable ignored) {
+                // 版本换了就跳过这条检查，不影响别的
+            }
+        }
+        if (!c.entryCompanion) {
+            try {
+                Class<?> cls = XposedHelpers.findClass("com.xiaomi.voiceassistant.o0", loader);
+                Object bridge = XposedHelpers.callStaticMethod(cls, "getFloatManagerBridge");
+                Object standby = XposedHelpers.callMethod(bridge, "isStandByMode");
+                if (Boolean.TRUE.equals(standby)) {
+                    return Entry.COMPANION.label;
+                }
+            } catch (Throwable ignored) {
+                // 同上
+            }
+        }
+        return null;
+    }
+
     /* ── 附件：图片 / 文件 ───────────────────────────────────────────
      *
      * 小爱所有多模态附件最后都落到 {@code sh0.n1.startFileUpload(Uri, n1.b, …)}
@@ -899,7 +1067,12 @@ public final class AssistRelay {
             log("media attach skipped: no context");
             return;
         }
-        log("media attach " + kind + " from=" + from + " uri=" + src);
+        Entry entry = effectiveEntry(from);
+        if (!entryAllowed(entry)) {
+            log("media ignored (entry " + entry + " off) from=" + from + " uri=" + src);
+            return;
+        }
+        log("media attach " + kind + " from=" + from + " entry=" + entry + " uri=" + src);
         long start = SystemClock.elapsedRealtime();
         Media media = materialize(ctx, src, kind);
         if (media == null) {
