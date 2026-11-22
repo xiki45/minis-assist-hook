@@ -300,6 +300,9 @@ public final class AssistRelay {
      */
     private static void hookNlpFunnel(ClassLoader cl) {
         hookByName(cl, "x20.i0", "startQuery", 1, "startQuery");
+        // 输入框的发送按钮走的是 3 参实例重载 startQuery(QueryParams, showQuery, z)，
+        // 不是 1 参静态那个——真机 14:09 两次实测都是这一条（见 commit 说明）。
+        hookByName(cl, "x20.i0", "startQuery", 3, "startQuery3");
         hookByName(cl, "x20.i0", "sendNlpRequest", 1, "sendNlpRequest");
         hookByName(cl, "y00.p", "n0", 1, "asrFinal(n0)");
         hookByName(cl, "y00.h", "onAll", 2, "engine.onAll(2)");
