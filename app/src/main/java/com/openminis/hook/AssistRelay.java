@@ -117,6 +117,11 @@ public final class AssistRelay {
     private static volatile long sLastContentAt;
     private static volatile String sLastContentKey;
     private static volatile boolean sInstalled;
+    /** 配置快照（来自模块 APK 的 RelayConfigProvider，1 s 缓存）。 */
+    private static volatile RelayConfig sConfig = RelayConfig.defaults();
+    private static volatile long sConfigAt;
+    private static volatile boolean sConfigWarned;
+    private static final long CONFIG_TTL_MS = 1_000L;
 
     /* 附件缓存：用户先挂图、后提问，所以附件在"提问"之前就要记下来。 */
     /** 附件有效期：超过就丢弃，避免上一轮截图粘到下一轮对话。 */
@@ -260,7 +265,7 @@ public final class AssistRelay {
     /* ── 唤起 ─────────────────────────────────────────────────────── */
 
     private static void onWake(Intent intent) {
-        if (!RELAY_ENABLED || intent == null) {
+        if (!config().relayEnabled || intent == null) {
             return;
         }
         Source source = classify(intent);
@@ -410,7 +415,7 @@ public final class AssistRelay {
                                         + " fromVT=" + safeBoolExtra(i, "fromVT"));
                                 noteSource(src, "speechQuery");
                                 String q = i.getStringExtra("assist_query");
-                                if (FORWARD_SPEECH_QUERY && !isEmpty(q)) {
+                                if (config().speechQuery && !isEmpty(q)) {
                                     deliverQuery(q, "speechQuery");
                                 }
                             } catch (Throwable t) {
@@ -428,7 +433,7 @@ public final class AssistRelay {
 
     /** UiManager.onAll(query, answer)：旧/浮窗路径的引擎结果层。 */
     private static void onContent(String query, String answer) {
-        if (!FORWARD_CONTENT || isEmpty(query)) {
+        if (!config().content || isEmpty(query)) {
             return;
         }
         deliverQuery(query, "nlp");
@@ -436,7 +441,7 @@ public final class AssistRelay {
 
     /** UiManager.onAsrResult(&lt;u20.b&gt;)：兜底。 */
     private static void onAsrModel(Object model) {
-        if (model == null || !FORWARD_CONTENT) {
+        if (model == null || !config().content) {
             return;
         }
         String query = callString(model, "getQuery");
@@ -456,7 +461,7 @@ public final class AssistRelay {
      * 所以最终是"输入框里是问句 + 一张图片附件"。</p>
      */
     private static void deliverQuery(String query, String from) {
-        if (!RELAY_ENABLED) {
+        if (!config().relayEnabled) {
             return;
         }
         String text = isEmpty(query) ? "" : query.trim();
@@ -483,7 +488,7 @@ public final class AssistRelay {
             }
             log("user message via " + from + ": " + text + " [" + source + "]");
             sendText(text, source);
-            if (DISMISS_XIAOAI) {
+            if (config().dismiss) {
                 scheduleDismissXiaoAi(sAppContext, source, DISMISS_DELAY_MS);
             }
             return;
@@ -495,7 +500,7 @@ public final class AssistRelay {
         sendMedia(media, source);
         final Context ctx = sAppContext;
         if (text.isEmpty()) {
-            if (DISMISS_XIAOAI) {
+            if (config().dismiss) {
                 scheduleDismissXiaoAi(ctx, source, DISMISS_DELAY_MS);
             }
             return;
@@ -506,7 +511,7 @@ public final class AssistRelay {
             @Override
             public void run() {
                 sendText(tail, tailSource);
-                if (DISMISS_XIAOAI) {
+                if (config().dismiss) {
                     scheduleDismissXiaoAi(ctx, tailSource, DISMISS_DELAY_MS);
                 }
             }
@@ -544,13 +549,14 @@ public final class AssistRelay {
      * 语音兜底），只挡明确说"保持原状"的那几条链路。
      */
     private static boolean isDeliverable(Source source) {
+        RelayConfig c = config();
         switch (source) {
             case UBIKITOUCH:
-                return FORWARD_UBIKITOUCH;
+                return c.ubikitouch;
             case SCREEN_RECOGNITION:
-                return FORWARD_SCREEN_RECOGNITION;
+                return c.screenRecognition;
             case GESTURE_LONG_PRESS:
-                return FORWARD_GESTURE_LONG_PRESS;
+                return c.gestureLongPress;
             default:
                 return true;
         }
@@ -885,7 +891,7 @@ public final class AssistRelay {
     }
 
     private static void onMediaAttached(Uri src, String kind, String from) {
-        if (!RELAY_ENABLED || !FORWARD_MEDIA || src == null) {
+        if (!config().relayEnabled || !config().media || src == null) {
             return;
         }
         Context ctx = sAppContext;
@@ -1094,7 +1100,7 @@ public final class AssistRelay {
     }
 
     private static List<Media> takeMedia() {
-        if (!FORWARD_MEDIA) {
+        if (!config().media) {
             dropMedia();
             return new ArrayList<>();
         }
@@ -1122,6 +1128,40 @@ public final class AssistRelay {
             this.bytes = bytes;
             this.displayName = displayName;
         }
+    }
+
+    /**
+     * 配置快照：模块 APK 里 {@link RelayConfigProvider} 的 {@code call("get")}，
+     * 1 s 缓存 —— 设置界面拨一下开关，下一次手势/发送就换成新值，不用重启小爱。
+     *
+     * <p>provider 拿不到（模块被停用/卸载）就退回 {@link RelayConfig#defaults()}，
+     * 也就是 v2.6 里写死的那套常量，行为不变。</p>
+     */
+    private static RelayConfig config() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - sConfigAt < CONFIG_TTL_MS) {
+            return sConfig;
+        }
+        sConfigAt = now;
+        Context ctx = sAppContext;
+        if (ctx == null) {
+            return sConfig;
+        }
+        try {
+            android.os.Bundle reply = ctx.getContentResolver().call(
+                    Uri.parse("content://" + RelayConfig.AUTHORITY),
+                    RelayConfig.METHOD_GET, null, null);
+            String json = reply == null ? null : reply.getString(RelayConfig.BUNDLE_JSON);
+            if (json != null) {
+                sConfig = RelayConfig.fromJson(json);
+            }
+        } catch (Throwable t) {
+            if (!sConfigWarned) {
+                sConfigWarned = true;
+                log("config provider unavailable, using defaults: " + t);
+            }
+        }
+        return sConfig;
     }
 
     /* ── 分类 ─────────────────────────────────────────────────────── */
@@ -1171,17 +1211,18 @@ public final class AssistRelay {
     }
 
     private static boolean isForwardable(Source source) {
+        RelayConfig c = config();
         switch (source) {
             case DOUBLE_CLICK_GESTURE:
-                return FORWARD_DOUBLE_CLICK;
+                return c.doubleClick;
             case POWER_LONG_PRESS:
-                return FORWARD_POWER_LONG_PRESS;
+                return c.powerLongPress;
             case GESTURE_LONG_PRESS:
-                return FORWARD_GESTURE_LONG_PRESS;
+                return c.gestureLongPress;
             case UBIKITOUCH:
-                return FORWARD_UBIKITOUCH;
+                return c.ubikitouch;
             case SCREEN_RECOGNITION:
-                return FORWARD_SCREEN_RECOGNITION;
+                return c.screenRecognition;
             default:
                 return false;
         }

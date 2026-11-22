@@ -18,6 +18,23 @@
             android:name="xposedscope"
             android:value="com.miui.voiceassist" />
 
+        <!-- 配置界面：哪条渠道唤起的小爱要转发 -->
+        <activity
+            android:name=".RelaySettingsActivity"
+            android:exported="true"
+            android:label="Minis 转发设置">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 把小爱进程（hook 侧）读不到的本 App SharedPreferences 暴露出去 -->
+        <provider
+            android:name=".RelayConfigProvider"
+            android:authorities="com.openminis.hook.config"
+            android:exported="true" />
+
     </application>
 
 </manifest>
