@@ -7,6 +7,50 @@
 > 配套 Minis 源码（提供 `MainActivityVoiceAssist` 入口）：
 > <https://github.com/xiki45/OpenMinis>（fork，默认分支 `feature/system-assist`）
 
+## 两条线
+
+同一个 `applicationId`（`com.openminis.hook`）下并行维护两条产品线，靠 **versionName 后缀**和
+**Release 标签前缀**区分，互不覆盖对方的发布记录：
+
+| 分支 | Release 标签 / 资产 | versionName | 做的事 |
+|---|---|---|---|
+| `main` | `v2.x` · `Minis.Assist.Hook_2.x.apk` | `2.5` | 只改道：手势唤起直接弹 Minis，小爱浮窗不出现 |
+| `feature/relay-share`（默认分支） | `relay-v2.x` · `Minis.Assist.Hook_2.x-relay.apk` | `2.6-relay` | 转发：小爱照常起来，用户发的内容（文字 / 图片 / 文件）被 hook 交给 Minis，随后收掉小爱浮窗 |
+
+两条线共用 `applicationId`，所以 versionCode 跨线单调递增（relay 永远大于同期 `main`），
+可以互相覆盖安装；装的是哪条线，看系统「应用信息」里的版本号后缀即可。
+
+## 转发线（`feature/relay-share`）
+
+不改唤起目标，只在**小爱进程内部**接管"用户到底发了什么"，再投递给 Minis 的
+`ShareReceiverActivity`：
+
+- **文字**：`UiManager.onAsrResult` / `onPartial` → `ACTION_SEND text/plain`；
+  打字发送走 `x20.i0#startQuery(QueryParams, String, boolean)`；
+- **图片 / 文件**：`sh0.n1#startFileUpload` 等四个多模态入口 → 把 Uri 复制进小爱自己的
+  cache 目录，用它的 `FileProvider` 授权给 Minis，`ACTION_SEND(_MULTIPLE)` + `EXTRA_STREAM`；
+- 附件先发、文字 450ms 后到，靠 Minis 侧 `SharedShareStore` 的 300s 合并窗口拼成一条；
+- 投递完成后 `stopService(com.miui.voiceassist.VoiceService)` 收掉小爱浮窗，避免和 Minis 重叠。
+
+每次转发由 `AssistRelay` 判定，开关存在本 App 的 SharedPreferences 里，由
+`content://com.openminis.hook.config`（`RelayConfigProvider`）暴露给跑在小爱进程里的 hook，
+所以**改开关即时生效，不用重启小爱**。设置页（`RelaySettingsActivity`）覆盖：
+
+| 分组 | 开关 | 默认 |
+|---|---|---|
+| 总开关 | 启用转发 | 开 |
+| 转发渠道 | 双击小白条 / 长按电源键 | 开 |
+| | 长按小白条 / 数字助手（ubikitouch）/ 小爱识屏 | 关 |
+| 「+」菜单入口 | 相机 / 相册 / 文档 / 识屏 | 开 |
+| | 屏幕翻译 / 小爱陪伴 | 关 |
+| 投递行为 | 转发图片文件 / 转发后收掉小爱 | 开 |
+| | 转发小爱的答复 / 转发卡片·H5 指令 | 关 |
+
+「屏幕翻译」「小爱陪伴」是两个自成一体的小爱模式（全屏翻译 / 视频陪伴），默认不接管：
+转发会把用户的话送走、又把小爱收掉，等于打断正在用的功能。关掉时靠两道闸门拦住——
+输入模块的入口回调（`gf0.d0.onMoreItem*Click`）记下本次会话从哪进来，投递前再查一次
+`checkTranslationIsOpen()` / `isStandByMode()` 兜底。
+
 ## 解决什么问题
 
 HyperOS（Redmi Note 14 5G / dali 已验证）在框架层封锁第三方助理：
@@ -145,3 +189,4 @@ adb shell am force-stop com.miui.voiceassist
 | v2.3 (versionName 2.3) | 抑制落点下移到 `VoiceService.onStartCommand`，修掉派发层 return-early 造成的 `executeNesting` 泄漏与 `waited 20001ms` ANR；找不到该类时自动退回旧路径 |
 | v2.4 (versionName 2.4) | 透传 `com.openminis.hook.trigger_id`（每次唤起唯一 id），替代两边各自的时间窗去重 |
 | v2.5 (versionName 2.5) | 透传 `com.openminis.hook.trigger_source` + `com.openminis.hook.version`（协议版本 1）；`attach_screen` 改由来源枚举判定；日志补 `source=/protocol=` |
+| relay-v2.6 (versionName 2.6-relay) | 转发线首个发布：文字 / 图片 / 文件转发给 Minis，投递后收掉小爱浮窗；每条渠道与「+」菜单六个入口各有开关，设置页改版（卡片分组、状态色开关、安全区、版本号）；「屏幕翻译」「小爱陪伴」默认关闭 |

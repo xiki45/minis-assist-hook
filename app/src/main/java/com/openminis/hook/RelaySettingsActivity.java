@@ -121,7 +121,7 @@ public final class RelaySettingsActivity extends Activity {
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("小爱 → Minis · 改动即时生效，无需重启小爱");
+        sub.setText("小爱 → Minis · 转发线 v" + versionName() + " · 改动即时生效，无需重启小爱");
         sub.setTextSize(13);
         sub.setTextColor(colorSub);
         sub.setPadding(0, dp(6), 0, dp(18));
@@ -320,6 +320,15 @@ public final class RelaySettingsActivity extends Activity {
         button.setStateListAnimator(null);
         button.setElevation(0f);
         return button;
+    }
+
+    /** 页头显示版本：main 是重定向线、这里是转发线，靠 versionName 后缀区分。 */
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 
     private interface Setter {

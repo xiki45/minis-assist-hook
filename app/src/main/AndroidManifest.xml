@@ -13,7 +13,7 @@
             android:value="93" />
         <meta-data
             android:name="xposeddescription"
-            android:value="把超级小爱的唤起重定向到 Minis" />
+            android:value="把超级小爱的唤起和内容转发到 Minis" />
         <meta-data
             android:name="xposedscope"
             android:value="com.miui.voiceassist" />
