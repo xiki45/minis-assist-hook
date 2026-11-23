@@ -2,6 +2,16 @@ plugins {
     id("com.android.application")
 }
 
+// 两条线共用 applicationId（见 README「两条线」），所以版号从 2.6.1 起划区间：
+//   main  = major*10000 + minor*100 + patch     （2.5.0 → 20500）
+//   relay = 1_000_000 + 同一公式                 （2.6.1 → 1020601）
+// 区间内单调递增、跨线不会撞号：relay 永远压得住 main；反过来 main 装到 relay 上
+// 属于降级，要 adb install -r -d 或先卸载。
+val major = 2
+val minor = 6
+val patch = 1
+val relayLineOffset = 1_000_000
+
 android {
     namespace = "com.openminis.hook"
     compileSdk = 35
@@ -13,10 +23,10 @@ android {
         applicationId = "com.openminis.hook"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        // 转发线自带 -relay 后缀：和 main 的重定向线共用 applicationId，
-        // 版本号必须大于 main，但名字要一眼能区分装的是哪条线。
-        versionName = "2.6-relay"
+        // 转发线版号 = 区间偏移 + 语义化版本编码，和 main 的重定向线不会撞号。
+        versionCode = relayLineOffset + major * 10_000 + minor * 100 + patch
+        // 名字带 -relay 后缀，一眼能区分装的是哪条线。
+        versionName = "$major.$minor.$patch-relay"
     }
 
     buildTypes {

@@ -40,6 +40,12 @@ public final class RelayConfig {
     /** 小爱陪伴：默认不接管（视频陪伴模式）。 */
     public boolean entryCompanion = false;
 
+    /**
+     * 设置页是否跟随系统动态取色（Monet / Material You）。只影响模块自己的设置界面，
+     * hook 侧不读这个字段，所以对转发行为零影响。
+     */
+    public boolean monet = true;
+
     public boolean media = true;
     public boolean dismiss = true;
     public boolean content = true;
@@ -50,7 +56,17 @@ public final class RelayConfig {
     }
 
     public static RelayConfig fromJson(String json) {
-        RelayConfig c = defaults();
+        return fromJson(json, defaults());
+    }
+
+    /**
+     * 把一段 JSON 叠到 {@code base} 上：缺的字段保留 base 的值。
+     *
+     * <p>adb 联调经常只写一个开关（{@code --arg '{"ubikitouch":true}'}），如果从默认值起算，
+     * 其余开关会被静默重置。</p>
+     */
+    public static RelayConfig fromJson(String json, RelayConfig base) {
+        RelayConfig c = base != null ? base : defaults();
         if (json == null) {
             return c;
         }
@@ -68,6 +84,7 @@ public final class RelayConfig {
             c.entryScreenRecognition = o.optBoolean("entryScreenRecognition", c.entryScreenRecognition);
             c.entryTranslate = o.optBoolean("entryTranslate", c.entryTranslate);
             c.entryCompanion = o.optBoolean("entryCompanion", c.entryCompanion);
+            c.monet = o.optBoolean("monet", c.monet);
             c.media = o.optBoolean("media", c.media);
             c.dismiss = o.optBoolean("dismiss", c.dismiss);
             c.content = o.optBoolean("content", c.content);
@@ -93,6 +110,7 @@ public final class RelayConfig {
             o.put("entryScreenRecognition", entryScreenRecognition);
             o.put("entryTranslate", entryTranslate);
             o.put("entryCompanion", entryCompanion);
+            o.put("monet", monet);
             o.put("media", media);
             o.put("dismiss", dismiss);
             o.put("content", content);

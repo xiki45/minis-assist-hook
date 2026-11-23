@@ -19,6 +19,8 @@ import android.util.Log;
  *     --arg '{"ubikitouch":true}'
  * </pre>
  *
+ * <p>{@code set} 是"叠加"语义：只给一个开关时，其余字段保持当前值。</p>
+ *
  * <p>只在本机、只影响本模块自己的开关，没有敏感数据。</p>
  */
 public final class RelayConfigProvider extends ContentProvider {
@@ -39,7 +41,9 @@ public final class RelayConfigProvider extends ContentProvider {
                 json = extras.getString(RelayConfig.BUNDLE_JSON);
             }
             if (json != null) {
-                RelayConfig.save(getContext(), RelayConfig.fromJson(json));
+                // 叠加在当前配置上，别让只写一个字段的 adb 调用把其它开关打回默认
+                RelayConfig.save(getContext(),
+                        RelayConfig.fromJson(json, RelayConfig.load(getContext())));
                 Log.i(TAG, "config set: " + json);
             }
         }

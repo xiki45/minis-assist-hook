@@ -15,10 +15,18 @@
 | 分支 | Release 标签 / 资产 | versionName | 做的事 |
 |---|---|---|---|
 | `main` | `v2.x` · `Minis.Assist.Hook_2.x.apk` | `2.5` | 只改道：手势唤起直接弹 Minis，小爱浮窗不出现 |
-| `feature/relay-share`（默认分支） | `relay-v2.x` · `Minis.Assist.Hook_2.x-relay.apk` | `2.6-relay` | 转发：小爱照常起来，用户发的内容（文字 / 图片 / 文件）被 hook 交给 Minis，随后收掉小爱浮窗 |
+| `feature/relay-share`（默认分支） | `relay-v2.x` · `Minis.Assist.Hook_2.x-relay.apk` | `2.6.1-relay` | 转发：小爱照常起来，用户发的内容（文字 / 图片 / 文件）被 hook 交给 Minis，随后收掉小爱浮窗 |
 
-两条线共用 `applicationId`，所以 versionCode 跨线单调递增（relay 永远大于同期 `main`），
-可以互相覆盖安装；装的是哪条线，看系统「应用信息」里的版本号后缀即可。
+两条线共用 `applicationId`，所以 **versionCode 划区间**，跨线不会撞号（2026-11-23 起）：
+
+| 线 | versionCode | 例 |
+|---|---|---|
+| `main` | `major*10000 + minor*100 + patch` | `2.5.0` → `20500` |
+| `feature/relay-share` | `1000000 + 同一公式` | `2.6.1-relay` → `1020601` |
+
+于是 relay 永远压得住 main，`adb install -r` 一定能覆盖安装；反过来把 main 装到 relay 上
+属于降级安装，会被系统拒绝，要 `adb install -r -d` 或先卸载。装的是哪条线，看系统
+「应用信息」里的版本号后缀即可（设置页「关于」卡片也会同时显示 versionName 和 versionCode）。
 
 ## 转发线（`feature/relay-share`）
 
@@ -43,8 +51,16 @@
 | | 长按小白条 / 数字助手（ubikitouch）/ 小爱识屏 | 关 |
 | 「+」菜单入口 | 相机 / 相册 / 文档 / 识屏 | 开 |
 | | 屏幕翻译 / 小爱陪伴 | 关 |
-| 投递行为 | 转发图片文件 / 转发后收掉小爱 | 开 |
-| | 转发小爱的答复 / 转发卡片·H5 指令 | 关 |
+| 投递行为 | 转发图片文件 / 转发后收掉小爱 / 转发小爱的答复 | 开 |
+| | 转发卡片·H5 指令 | 关 |
+| 外观 | 跟随系统取色（Monet，需 Android 12+） | 开 |
+
+设置页整页是代码画的（模块 APK 一直是无资源构建），结构为「状态总览卡 + 分组卡片 + 开关行」：
+顶部总览卡显示转发中 / 已暂停、渠道与入口的开启计数，总开关就在卡里；关掉总开关时下面所有分组
+整体置灰并禁用，避免误点。配色优先读系统的动态色板（Monet / Material You，`android.R.color.system_accent1_*`
+与 `system_neutral1_*`，API 31+，跟随壁纸取色），系统不支持或手动关掉时退回内置的深浅两套；
+开关是自绘的 Material 3 药丸（系统 `Switch` 在 HyperOS 上不吃 `trackTintList`，强调色出不来）。
+页脚可一键复制 ADB 命令、点击配置快照可整段复制。
 
 「屏幕翻译」「小爱陪伴」是两个自成一体的小爱模式（全屏翻译 / 视频陪伴），默认不接管：
 转发会把用户的话送走、又把小爱收掉，等于打断正在用的功能。关掉时靠两道闸门拦住——
@@ -189,4 +205,5 @@ adb shell am force-stop com.miui.voiceassist
 | v2.3 (versionName 2.3) | 抑制落点下移到 `VoiceService.onStartCommand`，修掉派发层 return-early 造成的 `executeNesting` 泄漏与 `waited 20001ms` ANR；找不到该类时自动退回旧路径 |
 | v2.4 (versionName 2.4) | 透传 `com.openminis.hook.trigger_id`（每次唤起唯一 id），替代两边各自的时间窗去重 |
 | v2.5 (versionName 2.5) | 透传 `com.openminis.hook.trigger_source` + `com.openminis.hook.version`（协议版本 1）；`attach_screen` 改由来源枚举判定；日志补 `source=/protocol=` |
+| relay-v2.6.1 (versionName 2.6.1-relay · versionCode 1020601) | 设置页重做：顶部状态总览卡（转发中 / 已暂停 + 渠道·入口计数 + 总开关）、分组卡片与状态栏安全区、自绘 M3 药丸开关、Monet 动态取色（API 31+，可关）、新增「外观」「关于」分组与配置快照点击复制、总开关关闭时其余分组整体置灰；`versionCode` 8 |
 | relay-v2.6 (versionName 2.6-relay) | 转发线首个发布：文字 / 图片 / 文件转发给 Minis，投递后收掉小爱浮窗；每条渠道与「+」菜单六个入口各有开关，设置页改版（卡片分组、状态色开关、安全区、版本号）；「屏幕翻译」「小爱陪伴」默认关闭 |
