@@ -9,12 +9,14 @@
 
 ## 两条线
 
-同一个 `applicationId`（`com.openminis.hook`）下并行维护两条产品线，靠 **versionName 后缀**和
-**Release 标签前缀**区分，互不覆盖对方的发布记录：
+同一个 `applicationId`（`com.openminis.hook`）下目前只有一条线在走：**转发线**
+（`feature/relay-share`，也是默认分支）。`main` 的重定向线停在 v2.5，不再跟版，只保留
+`v2.x` 的历史 Release，除非要回去修它的老 bug；两条线靠 **versionName 后缀**和
+**Release 标签前缀**区分，互不覆盖对方的发布记录。
 
 | 分支 | Release 标签 / 资产 | versionName | 做的事 |
 |---|---|---|---|
-| `main` | `v2.x` · `Minis.Assist.Hook_2.x.apk` | `2.5` | 只改道：手势唤起直接弹 Minis，小爱浮窗不出现 |
+| `main`（冻结，仅存历史） | `v2.x` · `Minis.Assist.Hook_2.x.apk` | `2.5` | 只改道：手势唤起直接弹 Minis，小爱浮窗不出现 |
 | `feature/relay-share`（默认分支） | `relay-v2.x` · `Minis.Assist.Hook_2.x-relay.apk` | `2.6.1-relay` | 转发：小爱照常起来，用户发的内容（文字 / 图片 / 文件）被 hook 交给 Minis，随后收掉小爱浮窗 |
 
 两条线共用 `applicationId`，所以 **versionCode 划区间**，跨线不会撞号（2026-11-23 起）：
@@ -27,6 +29,10 @@
 于是 relay 永远压得住 main，`adb install -r` 一定能覆盖安装；反过来把 main 装到 relay 上
 属于降级安装，会被系统拒绝，要 `adb install -r -d` 或先卸载。装的是哪条线，看系统
 「应用信息」里的版本号后缀即可（设置页「关于」卡片也会同时显示 versionName 和 versionCode）。
+
+`main` 冻结后那个 `1000000` 偏移**不要去掉**：已经发出去的安装包 versionCode 是 `1020601`，
+回头用 `2xxxx` 就是降级包，用户得先卸载重装。转发线只在 `minor` / `patch` 上累加即可
+（下一个功能版 `2.7.0` → `1020700`）。
 
 ## 转发线（`feature/relay-share`）
 
